@@ -1,3 +1,7 @@
 # homework_0
 
-To be completed later
+finalScript.R  contains the generates predicted movie ratings and RMSE score
+Report.Rmd - report format rmd
+Report.pdf - report format pdf
+
+
