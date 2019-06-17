@@ -1,0 +1,251 @@
+---
+title: "Recommendation System Report"
+author: "Lvesselova"
+date: "14 Jun 2019" 
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This is report relative to the creation of a Recommendation System based on the Movielens dataset. The purpose of the System is to predict movie ratings a particular user will give a specific movie. The System has been created following the main guidelines exposed in the Data Science : Machine Learning course.
+ 
+
+The libraries used for the creation process are  
+
+```{r loading-libs, message=FALSE}
+library(tidyverse)
+library(dslabs)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(caret)
+
+```
+
+
+The data has been loaded according to the instructions given in the Project Overview and contains 10m records relative to movies ratings. The dataset has been split into edx and validation subsets. The validation subset contains 10% of the whole dataset, whereas the edx subset represents 90% of the initial ratings data.
+
+We will train the machine learning algorithm using edx subset and use the validation set to predict movie ratings.
+
+```{r load rdas, echo=FALSE}
+    load("rdas/edx.rda")
+    load("rdas/validation.rda")
+```
+
+## RMSE function 
+
+To evaluate the algorithm, we will use the RMSE (residual mean squared error). This value should be less than 1 for the algorithm to be good. 
+
+```{r RMSE function}
+
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+The estimate that minimizes the RMSE is the least squares estimate of mu, and in our case, is the average of all ratings :
+
+```{r mu - average of all ratings}
+mu <- mean(edx$rating)
+mu
+```
+
+## Prediction based on the average
+
+Let's predict the ratings with just the average mu :
+
+```{r first prediction based on mu}
+
+first_rmse <- RMSE(validation$rating, mu)
+first_rmse
+```
+The first RMSE is not very good, it is greater than 1. We wil try to improve our model. For that we will consider some data caracteristics that affect the quality of the model and we will integrate them in our final model.
+
+## Movie Effects
+
+First, we observe that some movies are rated higher than others. We can calculate the movie effect b_i like this :
+
+```{r movie effect illustration}
+movie_avgs <- edx %>%
+  group_by(movieId) %>%
+  summarise(b_i = mean(rating - mu)) 
+
+movie_avgs %>% qplot(b_i, geom="histogram", bins=10, data=., color=I("black"))
+
+```
+
+## User Effects
+
+Second, we observe that some users are passive, others are very active and rate almost every movie, some are difficult and give not so high rates, others easily give high rates :
+
+
+```{r user effect illustration for users with more than 100 ratings, echo=FALSE}
+  edx %>% 
+  group_by(userId) %>%
+  summarise(b_u = mean(rating)) %>%
+              filter(n() >= 100) %>%
+              ggplot(aes(b_u)) +
+              geom_histogram(bins = 20, color = "black")
+```
+
+The estimation of the user effect, b_u, can be computed like this :
+
+
+```{r b_u estimation}
+
+  user_avgs <- edx %>%
+  left_join(movie_avgs, by="movieId") %>%
+  group_by(userId) %>%
+  summarise(b_u = mean(rating - mu - b_i)) 
+
+```
+
+## Regularization
+
+In order to improve our model, we have to make a regularization to avoid mistakes in the model due to the small sample size effect. These mistakes are due to a small number of users, in most cases just 1, rating a movie. This increase uncertainty because of larger estimates of b_i.
+
+Here are the lists of 10 "worst"" and 10 "best"" movies. Some of them have very few ratings and, therefore, large b_i, e.g. 'Hellhounds on My Trail' or 'Hi-Line, The' :
+
+```{r small sample issues, echo=FALSE}
+
+movie_titles <- edx %>%
+  select(movieId, title) %>% 
+distinct()
+
+#10 "best" movies
+
+edx %>% dplyr::count(movieId) %>%
+ left_join(movie_avgs) %>%
+ left_join(movie_titles,by="movieId") %>%
+ arrange(desc(b_i)) %>%
+ select(title, b_i, n) %>%
+ slice(1:10)
+
+```
+
+
+```{r 10 "worst"" movies , echo=FALSE}
+
+edx %>% dplyr::count(movieId) %>%
+ left_join(movie_avgs) %>%
+ left_join(movie_titles,by="movieId") %>%
+ arrange((b_i)) %>%
+ select(title, b_i, n) %>%
+ slice(1:10)
+
+```
+
+To penalize large estimates, we use regularization. In order to regularize our estimates, we will use a penalty parameter lambda, that minimizes the uncertainty : when the sample size, n_i, is large, the penalty lamda is ignored, when n_i is small, the estimate b_i is shrunk to 0. We can use regularization for the estimate user effect b_u as well.
+
+## Finding the optimal lambdas 
+
+Here we are using the cross validation to pick the optimal lambda. We also regularize the both estimates for movie and user effects, b_i and b_u :
+
+
+```{r optimal lambdas}
+
+ lambdas <- seq(0,10,0.25)
+ mu <- mean(edx$rating)
+
+ rmses <- sapply(lambdas, function(l){
+
+     mu <- mean(edx$rating)
+
+     b_i <- edx %>%
+         group_by(movieId) %>%
+         summarise(b_i = sum(rating-mu)/(n()+l))
+
+     b_u <- edx %>%
+         left_join(b_i,by="movieId") %>%
+         group_by(userId) %>%
+         summarise(b_u=sum(rating-b_i-mu)/(n()+l))
+
+ predicted_ratings <- 
+ validation %>%
+ left_join(b_i,by="movieId") %>%
+ left_join(b_u,by="userId") %>%
+ mutate(pred=mu+b_i+b_u) %>%
+ pull(pred)
+
+ return(RMSE(predicted_ratings, validation$rating))
+ })
+
+ qplot(lambdas, rmses)
+```
+
+We can see on the curve that for the full model the optimal lambda parameter is 5.25. Now, taking into account the penalty parameter lambda = 5.25, we will select the first 10 best and 10 worst movies with their number of ratings :
+
+```{r top 10 best movies with lamda integrated, echo=FALSE}
+lambda <- 5.25
+
+movie_reg_avgs <- edx %>%
+ group_by(movieId) %>%
+ summarise(b_i=sum(rating-mu)/(n()+lambda), n_1=n())
+
+edx %>%
+ dplyr::count(movieId) %>%
+ left_join(movie_reg_avgs, by="movieId") %>%
+ left_join(movie_titles, by="movieId") %>%
+ arrange(desc(b_i)) %>%
+ rename(best_movies = title) %>%
+ select(best_movies,b_i,n) %>%
+ slice(1:10)
+
+```
+
+```{r top 10 worst movies with lamda integrated, echo=FALSE}
+
+edx %>%
+ dplyr::count(movieId) %>%
+ left_join(movie_reg_avgs, by="movieId") %>%
+ left_join(movie_titles, by="movieId") %>%
+ arrange(b_i) %>%
+ rename(worst_movies = title) %>%
+ select(worst_movies,b_i,n) %>%
+ slice(1:10)
+
+```
+
+In the listings above we can see large n sizes for the best movies. So, it looks better with the penalty lambda is applied.
+
+## Final Results
+
+The final script calculating ratings prediction is like this : 
+
+```{r final script for ratings prediction}
+
+lambda <- 5.25
+
+mu <- mean(edx$rating)
+
+b_i <- edx %>%
+         group_by(movieId) %>%
+         summarise(b_i = sum(rating-mu)/(n()+lambda))
+
+b_u <- edx %>%
+         left_join(b_i,by="movieId") %>%
+         group_by(userId) %>%
+         summarise(b_u=sum(rating-b_i-mu)/(n()+lambda))
+
+ predicted_ratings <- 
+ validation %>%
+ left_join(b_i,by="movieId") %>%
+ left_join(b_u,by="userId") %>%
+ mutate(pred=mu+b_i+b_u) %>%
+ pull(pred)
+
+
+rmse_result <- RMSE(predicted_ratings, validation$rating) 
+rmse_result
+```
+
+
+## Conclusion
+
+For this machine learning exercice we have used a 10M ratings data subset that we split into two subsets : edx and validation. We analyzed the general properties of the data and noticed some particularities such as movie and user effects that impact the final rating prediction. We included these particularities in the model to improve its performance. Also, in order to decrease the uncertainty due to the presence of the small sample sizes in the data set, we used the regularization to constrain the variability of the small sizes effect. All these actions significantly improved the final prediction and reduced the standard error RMSE. Our final model has a very good RMSE : 0.864817
+
+
